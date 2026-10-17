@@ -60,3 +60,16 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Xcode
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+
+# Swift Package Manager
+.swiftpm/
+
+# Local secrets
+.env
+.env.*

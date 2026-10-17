@@ -1,0 +1,141 @@
+
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          PROJECT="koin.xcodeproj/project.pbxproj"
+
+          if [[ ! -f "$PROJECT" ]]; then
+            echo "Xcode project not found: $PROJECT" >&2
+            exit 1
+          fi
+
+          # Read all MARKETING_VERSION values from the project.
+          mapfile -t VERSIONS < <(
+            sed -nE \
+              's/^[[:space:]]*MARKETING_VERSION = ([^;]+);/\1/p' \
+              "$PROJECT" | sort -u
+          )
+
+          if [[ "${#VERSIONS[@]}" -ne 1 ]]; then
+            echo "Expected exactly one unique MARKETING_VERSION." >&2
+            printf 'Found: %s\n' "${VERSIONS[@]}" >&2
+            exit 1
+          fi
+
+          VERSION="${VERSIONS[0]}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version: $VERSION" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists. Skipping release."
+            exit 0
+          fi
+
+          PREVIOUS_TAG="$(
+            git tag --merged HEAD \
+              --list 'v[0-9]*' \
+              --sort=-version:refname \
+              | head -n 1
+          )"
+
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            RANGE="$PREVIOUS_TAG..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          declare -A sections=(
+            [feat]="Features"
+            [fix]="Bug Fixes"
+            [perf]="Performance"
+            [refactor]="Refactoring"
+            [docs]="Documentation"
+            [test]="Tests"
+            [build]="Build"
+            [ci]="CI"
+            [chore]="Maintenance"
+          )
+
+          declare -A notes
+
+          conventional_commit_regex='^([a-z]+)(\([^)]+\))?!?:[[:space:]]+(.+)$'
+
+          while IFS= read -r subject; do
+            if [[ "$subject" =~ $conventional_commit_regex ]]; then
+              type="${BASH_REMATCH[1]}"
+              message="${BASH_REMATCH[3]}"
+
+              if [[ -n "${sections[$type]:-}" ]]; then
+                notes[$type]+="- $message"$'\n'
+              fi
+            fi
+          done < <(git log "$RANGE" --no-merges --pretty=format:%s)
+
+          {
+            echo "# $TAG"
+            echo
+
+            for type in feat fix perf refactor docs test build ci chore; do
+              if [[ -n "${notes[$type]:-}" ]]; then
+                echo "## ${sections[$type]}"
+                echo
+                printf '%s\n' "${notes[$type]}"
+              fi
+            done
+
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${TAG}"
+            fi
+          } > release-notes.md
+
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md
